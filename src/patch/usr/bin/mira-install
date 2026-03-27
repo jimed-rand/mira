@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ========================================
-# Mira Installer
+# Mira ALARM Installer
 # ========================================
 
 if ! [ -x "$(command -v parted)" ]; then
@@ -24,6 +24,10 @@ if ! [ -x "$(command -v mkfs.ext4)" ]; then
   exit 1
 fi
 
+if ! [ -x "$(command -v mkfs.xfs)" ]; then
+  echo 'Warning: xfsprogs is not installed, XFS choice might fail.' >&2
+fi
+
 function pprint() {
     echo -ne "\e[37m${1}\e[39m"
 }
@@ -42,7 +46,7 @@ DEFAULT_UBOOT=/root/default-uboot.img
 DEST_MNT=/mnt/MiraInstall
 
 echo "========================================="
-echo "           Mira Installer                "
+echo "        Mira ALARM Installer             "
 echo "========================================="
 echo "Select installation target:"
 echo "1) eMMC (Internal Storage)"
@@ -75,13 +79,54 @@ case "$TARGET_CHOICE" in
     ;;
 esac
 
+# Identify eMMC explicitly for swap
+EMMC_DEV="/dev/$(lsblk -l -o NAME | grep -oE '(mmcblk[0-9]?boot0)' | sed "s/boot0//g" | head -n 1)"
+if [ -z "$EMMC_DEV" ] || [ "$EMMC_DEV" == "/dev/" ]; then
+    EMMC_DEV=""
+fi
+
+echo "-----------------------------------------"
+echo "Choose Root Filesystem type:"
+echo "1) ext4 (Default)"
+echo "2) xfs"
+read -p "[?] Your choice: " FS_CHOICE
+
+if [ "$FS_CHOICE" == "2" ]; then
+    ROOTFS_TYPE="xfs"
+    FSTAB_TYPE="xfs"
+    FSTAB_OPTIONS="defaults,noatime 0 1"
+else
+    ROOTFS_TYPE="ext4"
+    FSTAB_TYPE="ext4"
+    FSTAB_OPTIONS="defaults,noatime,errors=remount-ro,commit=60 0 1"
+fi
+
+echo "-----------------------------------------"
+echo "Swap configuration (3072 MiB):"
+echo "1) Create Swap on eMMC (Fully use eMMC if target is SD, or partitioned if eMMC)"
+echo "2) Create Swap on SD Card"
+echo "3) No Swap"
+read -p "[?] Your choice: " SWAP_CHOICE
+
+case "$SWAP_CHOICE" in
+  1) SWAP_TARGET="eMMC" ;;
+  2) SWAP_TARGET="SD" ;;
+  *) SWAP_TARGET="None" ;;
+esac
+
 if [ -z "$DEST_DEV" ] || [ "$DEST_DEV" == "/dev/" ]; then
     echo "Error: Could not find target device ($TARGET_NAME)."
     exit 1
 fi
 
 DEST_BOOT="${DEST_DEV}p1"
-DEST_ROOT="${DEST_DEV}p2"
+
+if [ "$SWAP_TARGET" == "$TARGET_TYPE" ]; then
+    DEST_SWAP="${DEST_DEV}p2"
+    DEST_ROOT="${DEST_DEV}p3"
+else
+    DEST_ROOT="${DEST_DEV}p2"
+fi
 
 read -p "[?] Hostname: " DEFINED_HOSTNAME
 DEFINED_HOSTNAME="$(echo -e "${DEFINED_HOSTNAME}" | tr -d '[:space:]')"
@@ -109,18 +154,43 @@ dd if=/dev/zero of=${DEST_DEV} bs=512 count=1 conv=fsync > /dev/null 2>&1
 status_text $?
 sync
 
-pprint "    > Format $TARGET_NAME to msdos"
-parted -s "${DEST_DEV}" mklabel msdos > /dev/null 2>&1
+pprint "    > Format $TARGET_NAME to gpt"
+parted -s "${DEST_DEV}" mklabel gpt > /dev/null 2>&1
 status_text $?
 sync
-pprint "    > Create boot partition"
-parted -s "${DEST_DEV}" mkpart primary fat32 $((SKIP * 1024 * 1024))b $(((SKIP + BOOT) * 1024 * 1024 - 1))b > /dev/null 2>&1
+pprint "    > Create boot partition (ESP)"
+parted -s "${DEST_DEV}" mkpart "ESP" fat32 $((SKIP * 1024 * 1024))b $(((SKIP + BOOT) * 1024 * 1024 - 1))b > /dev/null 2>&1
+parted -s "${DEST_DEV}" set 1 esp on > /dev/null 2>&1
 status_text $?
 sync
-pprint "    > Create root partition"
-parted -s "${DEST_DEV}" mkpart primary ext4 $(((SKIP + BOOT) * 1024 * 1024))b 100% > /dev/null 2>&1
-status_text $?
-sync
+
+if [ "$SWAP_TARGET" == "$TARGET_TYPE" ]; then
+    pprint "    > Create swap partition (3072 MiB)"
+    parted -s "${DEST_DEV}" mkpart "SWAP" linux-swap $(((SKIP + BOOT) * 1024 * 1024))b $(((SKIP + BOOT + 3072) * 1024 * 1024 - 1))b > /dev/null 2>&1
+    status_text $?
+    sync
+    pprint "    > Create root partition ($ROOTFS_TYPE)"
+    parted -s "${DEST_DEV}" mkpart "ROOT" ${ROOTFS_TYPE} $(((SKIP + BOOT + 3072) * 1024 * 1024))b 100% > /dev/null 2>&1
+    status_text $?
+    sync
+else
+    pprint "    > Create root partition ($ROOTFS_TYPE)"
+    parted -s "${DEST_DEV}" mkpart "ROOT" ${ROOTFS_TYPE} $(((SKIP + BOOT) * 1024 * 1024))b 100% > /dev/null 2>&1
+    status_text $?
+    sync
+fi
+
+if [ "$TARGET_TYPE" == "SD" ] && [ "$SWAP_TARGET" == "eMMC" ] && [ -n "$EMMC_DEV" ]; then
+    pprint "    > Create swap using entire eMMC storage"
+    dd if=/dev/zero of=${EMMC_DEV} bs=512 count=1 conv=fsync > /dev/null 2>&1
+    parted -s "${EMMC_DEV}" mklabel gpt > /dev/null 2>&1
+    parted -s "${EMMC_DEV}" mkpart "SWAP" linux-swap 1MiB 100% > /dev/null 2>&1
+    mkswap -f -L "SWAP_TARGET" "${EMMC_DEV}p1" > /dev/null 2>&1
+    status_text $?
+    sync
+elif [ "$SWAP_TARGET" == "SD" ] && [ "$TARGET_TYPE" == "eMMC" ]; then
+    pprint "    ! Warning: Swap target SD while installing to eMMC not automatically partitioned."
+fi
 
 if [ "$TARGET_TYPE" == "eMMC" ]; then
     pprint "[+] Restore u-boot"
@@ -132,8 +202,18 @@ fi
 
 pprint "[+] Formatting $TARGET_NAME partition"
 mkfs.vfat -F32 -n "BOOT_TARGET" "$DEST_BOOT" > /dev/null 2>&1
-mkfs.ext4 -O ^metadata_csum,^64bit -F -L "ROOT_TARGET" "$DEST_ROOT" > /dev/null 2>&1
-tune2fs -O fast_commit $DEST_ROOT > /dev/null 2>&1
+
+if [ "$ROOTFS_TYPE" == "xfs" ]; then
+    mkfs.xfs -f -L "ROOT_TARGET" "$DEST_ROOT" > /dev/null 2>&1
+else
+    mkfs.ext4 -O ^metadata_csum,^64bit -F -L "ROOT_TARGET" "$DEST_ROOT" > /dev/null 2>&1
+    tune2fs -O fast_commit $DEST_ROOT > /dev/null 2>&1
+fi
+
+if [ "$SWAP_TARGET" == "$TARGET_TYPE" ]; then
+    mkswap -f -L "SWAP_TARGET" "$DEST_SWAP" > /dev/null 2>&1
+fi
+
 status_text $?
 sync
 
@@ -155,9 +235,13 @@ sync
 
 pprint "[+] Updating configs"
 cat >${DEST_MNT}/etc/fstab <<EOF
-LABEL=ROOT_TARGET       /               ext4            defaults,noatime,errors=remount-ro,commit=60     0 1
-LABEL=BOOT_TARGET 	/boot           vfat        defaults,noatime,errors=remount-ro,commit=60     0 2
+LABEL=ROOT_TARGET       /               ${FSTAB_TYPE}            ${FSTAB_OPTIONS}
+LABEL=BOOT_TARGET 	/boot           vfat        defaults,noatime,errors=remount-ro 0 2
 EOF
+
+if [ "$SWAP_TARGET" != "None" ]; then
+    echo "LABEL=SWAP_TARGET       none            swap            defaults        0 0" >> ${DEST_MNT}/etc/fstab
+fi
 
 sed -i "s|${CURRENT_HOSTNAME}|${DEFINED_HOSTNAME}|g" "${DEST_MNT}/etc/hosts"
 sed -i "s|${CURRENT_HOSTNAME}|${DEFINED_HOSTNAME}|g" "${DEST_MNT}/etc/hostname"
@@ -174,9 +258,40 @@ fi
 status_text $?
 sync
 
+pprint "[+] Reconfiguring GRUB for target device"
+mount --bind /dev "${DEST_MNT}/dev"
+mount --bind /sys "${DEST_MNT}/sys"
+mount --bind /proc "${DEST_MNT}/proc"
+chroot "$DEST_MNT" /bin/bash -c "grub-install --target=arm64-efi --efi-directory=/boot --bootloader-id=Mira --removable" > /dev/null 2>&1
+chroot "$DEST_MNT" /bin/bash -c "grub-mkconfig -o /boot/grub/grub.cfg" > /dev/null 2>&1
+umount "${DEST_MNT}/dev"
+umount "${DEST_MNT}/sys"
+umount "${DEST_MNT}/proc"
+status_text $?
+sync
+
 umount -R "$DEST_MNT" >/dev/null 2>&1
 rm -r "$DEST_MNT"
 status_text $?
-
-pprint "[+] DONE\n"
 sync
+
+echo ""
+echo "================================================================="
+echo " Congratulations! Mira ALARM installation has completed successfully. "
+echo "================================================================="
+if [ "$TARGET_TYPE" == "eMMC" ]; then
+    echo " Please remove the installation media (USB drive) before the"
+    echo " device reboots to boot directly from internal storage."
+else
+    echo " Make sure your SD Card is securely inserted as the boot drive."
+fi
+echo ""
+echo " Default Login Credentials:"
+echo "   Username: root  | Password: root"
+echo "   Username: alarm | Password: alarm"
+echo "-----------------------------------------------------------------"
+echo " The system will automatically reboot in 60 seconds."
+echo ""
+read -t 60 -p " Press [ENTER] to reboot immediately..." || true
+echo -e "\nRebooting now..."
+reboot
