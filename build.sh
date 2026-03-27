@@ -1,6 +1,10 @@
 #!/bin/bash
 
-OUT_FILENAME="ArchLinuxARM-aarch64_S905X"
+echo -e "\n============================================="
+echo -e "                 Mira Builder                "
+echo -e "=============================================\n"
+
+OUT_FILENAME="${OUT_FILENAME:-Mira-ArchLinuxARM-aarch64_S905X}"
 
 ROOTFS_TYPE="ext4"
 
@@ -13,8 +17,8 @@ BOOT_LABEL="BOOT"
 ROOT_LABEL="ROOT"
 
 IMG_FILENAME="${OUT_FILENAME}.img"
-WORKING_DIR="/WORKING_DIR"
-ARCHLINUXARM_TARBALL_FILE="${WORKING_DIR}/ArchLinuxARM-aarch64.tar.gz"
+WORKING_DIR="${WORKING_DIR:-/WORKING_DIR}"
+ROOTFS_TARBALL_FILE="${ROOTFS_TARBALL_FILE:-${WORKING_DIR}/ArchLinuxARM-aarch64.tar.gz}"
 OUT_DIR="${WORKING_DIR}/BUILD_OUT"
 BOOT_FILES="${WORKING_DIR}/src/boot-files"
 PATCH_FILES="${WORKING_DIR}/src/patch"
@@ -72,20 +76,24 @@ make_image() {
 
   print_msg "[3/5] Copying files"
   cp -af ${BOOT_FILES}/* mnt/boot
-  bsdtar -xpf ${ARCHLINUXARM_TARBALL_FILE} -C mnt
+  bsdtar -xpf "${ROOTFS_TARBALL_FILE}" -C mnt
   cp -af ${PATCH_FILES}/* mnt/
   [ -f ${WORKING_DIR}/lscolors.sh ] && cp ${WORKING_DIR}/lscolors.sh mnt/etc && chmod +x mnt/etc/lscolors.sh
 
-  cat mnt/etc/_bashrc >> mnt/etc/bash.bashrc && rm mnt/etc/_bashrc
+  if [ -f mnt/etc/_bashrc ] && [ -f mnt/etc/bash.bashrc ]; then
+    cat mnt/etc/_bashrc >> mnt/etc/bash.bashrc && rm mnt/etc/_bashrc
+  fi
 
-  # Modify mkinitcpio
-  sed -i "s/PRESETS=.*/PRESETS=('default')/" mnt/etc/mkinitcpio.d/linux-aarch64.preset
-  sed -i 's/ALL_kver=.*/ALL_kver="\/boot\/Image"/' mnt/etc/mkinitcpio.d/linux-aarch64.preset
-  sed -i '/^[^#]/ s/\(^fallback_.*$\)/#\1/' mnt/etc/mkinitcpio.d/linux-aarch64.preset
+  # Modify mkinitcpio (Arch Linux specific)
+  if [ -d mnt/etc/mkinitcpio.d ]; then
+    sed -i "s/PRESETS=.*/PRESETS=('default')/" mnt/etc/mkinitcpio.d/linux-aarch64.preset 2>/dev/null || true
+    sed -i 's/ALL_kver=.*/ALL_kver="\/boot\/Image"/' mnt/etc/mkinitcpio.d/linux-aarch64.preset 2>/dev/null || true
+    sed -i '/^[^#]/ s/\(^fallback_.*$\)/#\1/' mnt/etc/mkinitcpio.d/linux-aarch64.preset 2>/dev/null || true
+  fi
 
-  # cleaning up
-  rm mnt/boot/{Image.gz,initramfs-linux-fallback.img}
-  find ./mnt/boot/dtbs -mindepth 1 ! -regex '^./mnt/boot/dtbs/amlogic\(/.*\)?' -delete
+  # cleaning up (Arch Linux specific)
+  rm -f mnt/boot/{Image.gz,initramfs-linux-fallback.img}
+  find ./mnt/boot/dtbs -mindepth 1 ! -regex '^./mnt/boot/dtbs/amlogic\(/.*\)?' -delete 2>/dev/null || true
 
   print_msg "[4/5] Setup Boot Files"
   mkimage -A arm64 -O linux -T script -C none -a 0 -e 0 -n "S905 autoscript" -d mnt/boot/s905_autoscript.cmd mnt/boot/s905_autoscript 2>/dev/null

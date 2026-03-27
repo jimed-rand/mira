@@ -1,0 +1,182 @@
+#!/bin/bash
+
+# ========================================
+# Mira Installer
+# ========================================
+
+if ! [ -x "$(command -v parted)" ]; then
+  echo 'Error: parted is not installed.' >&2
+  exit 1
+fi
+
+if ! [ -x "$(command -v rsync)" ]; then
+  echo 'Error: rsync is not installed.' >&2
+  exit 1
+fi
+
+if ! [ -x "$(command -v mkfs.vfat)" ]; then
+  echo 'Error: dosfstools is not installed.' >&2
+  exit 1
+fi
+
+if ! [ -x "$(command -v mkfs.ext4)" ]; then
+  echo 'Error: e2fsprogs is not installed.' >&2
+  exit 1
+fi
+
+function pprint() {
+    echo -ne "\e[37m${1}\e[39m"
+}
+
+function status_text() {
+    if [ $1 -eq 0 ]; then
+      echo -e " \e[32m[OK]\e[39m"
+    else
+      echo -e " \e[31m[FAIL]\e[39m"
+    fi
+}
+
+SKIP=700
+BOOT=256
+DEFAULT_UBOOT=/root/default-uboot.img
+DEST_MNT=/mnt/MiraInstall
+
+echo "========================================="
+echo "           Mira Installer                "
+echo "========================================="
+echo "Select installation target:"
+echo "1) eMMC (Internal Storage)"
+echo "2) SD Card / TF Card"
+echo "3) Exit"
+echo "-----------------------------------------"
+read -p "[?] Your choice: " TARGET_CHOICE
+
+case "$TARGET_CHOICE" in
+  1)
+    TARGET_TYPE="eMMC"
+    EMMC_NAME="$(lsblk -l -o NAME | grep -oE '(mmcblk[0-9]?boot0)' | sed "s/boot0//g")"
+    DEST_DEV="/dev/$EMMC_NAME"
+    TARGET_NAME="eMMC"
+    ;;
+  2)
+    TARGET_TYPE="SD"
+    EMMC_NAME="$(lsblk -l -o NAME | grep -oE '(mmcblk[0-9]?boot0)' | sed "s/boot0//g")"
+    if [ -n "$EMMC_NAME" ]; then
+      SD_NAME="$(lsblk -l -o NAME | grep -oE '^mmcblk[0-9]+$' | grep -v "$EMMC_NAME" | head -n 1)"
+    else
+      SD_NAME="$(lsblk -l -o NAME | grep -oE '^mmcblk[0-9]+$' | head -n 1)"
+    fi
+    DEST_DEV="/dev/$SD_NAME"
+    TARGET_NAME="SD Card"
+    ;;
+  *)
+    echo "Exiting."
+    exit 0
+    ;;
+esac
+
+if [ -z "$DEST_DEV" ] || [ "$DEST_DEV" == "/dev/" ]; then
+    echo "Error: Could not find target device ($TARGET_NAME)."
+    exit 1
+fi
+
+DEST_BOOT="${DEST_DEV}p1"
+DEST_ROOT="${DEST_DEV}p2"
+
+read -p "[?] Hostname: " DEFINED_HOSTNAME
+DEFINED_HOSTNAME="$(echo -e "${DEFINED_HOSTNAME}" | tr -d '[:space:]')"
+CURRENT_HOSTNAME="$(cat /etc/hostname | sed -e 's/^[[:space:]]*//')"
+
+rm -rf /boot/LOST.DIR >/dev/null 2>&1
+
+pprint "[+] $TARGET_NAME found: $DEST_DEV\n"
+
+umount ${DEST_DEV}?* >/dev/null 2>&1
+
+pprint "[+] Start installing to $DEST_DEV\n"
+
+if [ "$TARGET_TYPE" == "eMMC" ]; then
+    pprint "[+] Backup u-boot to $DEFAULT_UBOOT"
+    dd if="${DEST_DEV}" of="$DEFAULT_UBOOT" bs=1M count=4 conv=fsync > /dev/null 2>&1
+    status_text $?
+    sync
+fi
+
+pprint "[+] Update $TARGET_NAME partition\n"
+
+pprint "    > Zero the beginning of the $TARGET_NAME"
+dd if=/dev/zero of=${DEST_DEV} bs=512 count=1 conv=fsync > /dev/null 2>&1
+status_text $?
+sync
+
+pprint "    > Format $TARGET_NAME to msdos"
+parted -s "${DEST_DEV}" mklabel msdos > /dev/null 2>&1
+status_text $?
+sync
+pprint "    > Create boot partition"
+parted -s "${DEST_DEV}" mkpart primary fat32 $((SKIP * 1024 * 1024))b $(((SKIP + BOOT) * 1024 * 1024 - 1))b > /dev/null 2>&1
+status_text $?
+sync
+pprint "    > Create root partition"
+parted -s "${DEST_DEV}" mkpart primary ext4 $(((SKIP + BOOT) * 1024 * 1024))b 100% > /dev/null 2>&1
+status_text $?
+sync
+
+if [ "$TARGET_TYPE" == "eMMC" ]; then
+    pprint "[+] Restore u-boot"
+    dd if="$DEFAULT_UBOOT" of="${DEST_DEV}" conv=fsync bs=1 count=442 > /dev/null 2>&1
+    dd if="$DEFAULT_UBOOT" of="${DEST_DEV}" conv=fsync bs=512 skip=1 seek=1 > /dev/null 2>&1
+    status_text $?
+    sync
+fi
+
+pprint "[+] Formatting $TARGET_NAME partition"
+mkfs.vfat -F32 -n "BOOT_TARGET" "$DEST_BOOT" > /dev/null 2>&1
+mkfs.ext4 -O ^metadata_csum,^64bit -F -L "ROOT_TARGET" "$DEST_ROOT" > /dev/null 2>&1
+tune2fs -O fast_commit $DEST_ROOT > /dev/null 2>&1
+status_text $?
+sync
+
+pprint "[+] Mounting '$DEST_DEV' partition to '$DEST_MNT'"
+if [ -d ${DEST_MNT} ]; then
+    rm -rf ${DEST_MNT}
+fi
+mkdir -p ${DEST_MNT}
+mount "$DEST_ROOT" "$DEST_MNT" > /dev/null 2>&1
+mkdir -p "${DEST_MNT}/boot"
+mount "$DEST_BOOT" "$DEST_MNT/boot" > /dev/null 2>&1
+status_text $?
+sync
+
+pprint "[+] Copying files to $TARGET_NAME\n"
+rsync -axHAWXS --numeric-ids --info=progress2 / "$DEST_MNT/"
+rsync -axHAWXS --numeric-ids --info=progress2 /boot/ "$DEST_MNT/boot/"
+sync
+
+pprint "[+] Updating configs"
+cat >${DEST_MNT}/etc/fstab <<EOF
+LABEL=ROOT_TARGET       /               ext4            defaults,noatime,errors=remount-ro,commit=60     0 1
+LABEL=BOOT_TARGET 	/boot           vfat        defaults,noatime,errors=remount-ro,commit=60     0 2
+EOF
+
+sed -i "s|${CURRENT_HOSTNAME}|${DEFINED_HOSTNAME}|g" "${DEST_MNT}/etc/hosts"
+sed -i "s|${CURRENT_HOSTNAME}|${DEFINED_HOSTNAME}|g" "${DEST_MNT}/etc/hostname"
+
+sed -i "s|ROOT|ROOT_TARGET|g" "${DEST_MNT}/boot/extlinux/extlinux.conf"
+
+if [ "$TARGET_TYPE" == "eMMC" ]; then
+    if [ -f "${DEST_MNT}/boot/u-boot.ext" ]; then
+      cp "${DEST_MNT}/boot/u-boot.ext" "${DEST_MNT}/boot/u-boot.emmc"
+      sed -i "s|u-boot.ext|u-boot.emmc|g" "${DEST_MNT}/boot/boot.ini"
+    fi
+fi
+
+status_text $?
+sync
+
+umount -R "$DEST_MNT" >/dev/null 2>&1
+rm -r "$DEST_MNT"
+status_text $?
+
+pprint "[+] DONE\n"
+sync

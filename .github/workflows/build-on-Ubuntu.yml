@@ -1,6 +1,8 @@
-name: Build Arch Linux ARM
+name: Build Arch Linux ARM with Mira on Ubuntu-based host
 
 on:
+  release:
+    types: [published]
   workflow_dispatch:
 
 env:
@@ -12,7 +14,7 @@ env:
 jobs:
   build:
     # https://openwrt.org/docs/guide-developer/toolchain/install-buildsystem#debianubuntu
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Check out repository code
@@ -47,7 +49,7 @@ jobs:
 
       - name: Release the firmware
         uses: ncipollo/release-action@main
-        if: ${{ steps.build.outputs.status }} == 'success' && !cancelled()
+        if: ${{ steps.build.outputs.status == 'success' && !cancelled() }}
         with:
           tag: ArchLinuxARM-aarch64_${{ env.BUILD_DATE }}
           artifacts: ${{ env.WORKING_DIR }}/BUILD_OUT/*
