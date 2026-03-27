@@ -25,7 +25,119 @@ OUT_DIR="${SCRIPT_DIR}"
 BOOT_FILES="${SCRIPT_DIR}/src/boot-files"
 PATCH_FILES="${SCRIPT_DIR}/src/patch"
 
+cleanup() {
+  echo -e "\n[!] Running cleanup tasks..."
+  cd "${SCRIPT_DIR}" || true
+  if mountpoint -q "${WORKING_DIR}/mnt" >/dev/null 2>&1 || mount | grep -q "${WORKING_DIR}/mnt"; then
+    umount -R -f "${WORKING_DIR}/mnt" 2>/dev/null || true
+    umount -R -l "${WORKING_DIR}/mnt" 2>/dev/null || true
+  fi
+  if [[ -n "${LOOP_DEV:-}" ]]; then
+    losetup -d "${LOOP_DEV}" 2>/dev/null || true
+  fi
+  if [[ -d "${WORKING_DIR}" ]]; then
+    rm -rf "${WORKING_DIR}"
+  fi
+}
+trap "cleanup" EXIT INT TERM HUP
+
 mkdir -p "${WORKING_DIR}"
+
+DEPENDENCIES=(curl parted losetup mkfs.vfat mkfs.ext4 bsdtar mkimage xz qemu-aarch64-static)
+
+install_dependencies() {
+  local MISSING_DEPS=()
+  for cmd in "${DEPENDENCIES[@]}"; do
+    if ! command -v "$cmd" &> /dev/null; then
+      MISSING_DEPS+=("$cmd")
+    fi
+  done
+
+  if [ ${#MISSING_DEPS[@]} -eq 0 ]; then
+    return 0
+  fi
+
+  echo -e "Missing commands detected: ${MISSING_DEPS[*]}"
+  
+  if [ -f /etc/os-release ]; then
+    . /etc/os-release
+    local OS_ID="${ID:-}"
+    local OS_LIKE="${ID_LIKE:-}"
+    
+    get_pkg_name() {
+      case "$1" in
+        mkfs.vfat) echo "dosfstools" ;;
+        mkfs.ext4) echo "e2fsprogs" ;;
+        losetup) echo "util-linux" ;;
+        xz)
+          if [[ "$OS_ID" == "debian" || "$OS_LIKE" == *"debian"* ]]; then
+            echo "xz-utils"
+          else
+            echo "xz"
+          fi
+          ;;
+        bsdtar)
+          if [[ "$OS_ID" == "debian" || "$OS_LIKE" == *"debian"* ]]; then
+            echo "libarchive-tools"
+          else
+            echo "libarchive"
+          fi
+          ;;
+        qemu-aarch64-static) echo "qemu-user-static" ;;
+        mkimage)
+          if [[ "$OS_ID" == "debian" || "$OS_LIKE" == *"debian"* ]]; then
+            echo "u-boot-tools"
+          else
+            echo "uboot-tools"
+          fi
+          ;;
+        *) echo "$1" ;;
+      esac
+    }
+
+    local PKGS_TO_INSTALL=()
+    for dep in "${MISSING_DEPS[@]}"; do
+      PKGS_TO_INSTALL+=("$(get_pkg_name "$dep")")
+    done
+    
+    PKGS_TO_INSTALL=($(echo "${PKGS_TO_INSTALL[@]}" | tr ' ' '\n' | sort -u | tr '\n' ' '))
+
+    echo -e "Attempting to auto-install missing packages: ${PKGS_TO_INSTALL[*]}"
+
+    if [[ "$OS_ID" == "debian" || "$OS_ID" == "ubuntu" || "$OS_LIKE" == *"debian"* || "$OS_LIKE" == *"ubuntu"* ]]; then
+      export DEBIAN_FRONTEND=noninteractive
+      apt update -y && apt install -y "${PKGS_TO_INSTALL[@]}"
+    elif [[ "$OS_ID" == "arch" || "$OS_LIKE" == *"arch"* ]]; then
+      pacman -Sy --noconfirm "${PKGS_TO_INSTALL[@]}"
+    elif [[ "$OS_ID" == "fedora" || "$OS_LIKE" == *"fedora"* ]]; then
+      dnf install -y "${PKGS_TO_INSTALL[@]}"
+    elif [[ "$OS_ID" == "opensuse"* || "$OS_LIKE" == *"suse"* ]]; then
+      zypper ref && zypper in -y "${PKGS_TO_INSTALL[@]}"
+    elif [[ "$OS_ID" == "void" ]]; then
+      xbps-install -Sy "${PKGS_TO_INSTALL[@]}"
+    else
+      echo -e "[!] Your distribution ($OS_ID) does not support automatic dependency installation."
+      echo -e "[!] Please install the missing dependencies manually and re-run this script."
+      exit 1
+    fi
+    
+    for cmd in "${DEPENDENCIES[@]}"; do
+      if [[ "$cmd" != "qemu-aarch64-static" ]] && ! command -v "$cmd" &> /dev/null; then
+        echo -e "[!] Error: '$cmd' is still missing after auto-installation attempt. Aborting."
+        exit 1
+      fi
+    done
+  elif [ -f /etc/slackware-version ]; then
+     echo -e "[!] Slackware detected. Auto-installation is not supported without a preferred manager."
+     echo -e "[!] Please manually install missing dependencies: ${MISSING_DEPS[*]}"
+     exit 1
+  else
+    echo -e "[!] Unable to detect your distribution. Please install the missing dependencies manually."
+    exit 1
+  fi
+}
+
+install_dependencies
 
 if [ -z "$CI" ] && [ -t 0 ]; then
   echo "========================================="
@@ -173,22 +285,23 @@ make_image() {
   #mkimage -n "uImage" -A arm64 -O linux -T kernel -C none -a 0x1080000 -e 0x1080000 -d mnt/boot/Image mnt/boot/uImage 2>/dev/null
   sync
 
-  umount -R -f mnt 2>/dev/null
-  losetup -d ${LOOP_DEV} 2>/dev/null
+  print_msg "[6/6] Compress IMG File & Finalize"
+  xz -9 ${IMG_FILENAME} && mv "${IMG_FILENAME}.xz" "${OUT_DIR}/" 2>/dev/null || true
 
-  print_msg "[6/6] Compress IMG File"
-  xz -9 ${IMG_FILENAME} && mv "${IMG_FILENAME}.xz" "${OUT_DIR}/"
-  
-  cd "${DIR}" || exit 1
-  print_msg "Cleaning up working directory..."
-  rm -rf "${WORKING_DIR}"
-  
   echo "======================================================"
   echo " Image has been successfully built!"
-  echo " We suggest exporting this image to a USB device"
-  echo " (memory card/flashdrive) using a tool like 'dd', e.g.:"
-  echo " dd if=${OUT_DIR}/${IMG_FILENAME}.xz of=/dev/sdX bs=4M status=progress"
-  echo " so it can be installed to the STB's eMMC or SD Card."
+  echo " Location: ${OUT_DIR}/${IMG_FILENAME}.xz"
+  echo ""
+  echo " To flash this image to a USB drive or SD card (≥ 4 GiB), you can use it directly with graphical tools like:"
+  echo " - Balena Etcher, Raspberry Pi Imager, GNOME Disks, or Rufus (DD method) for Windows users."
+  echo ""
+  echo " Or you can use 'dd' via terminal (please substitute /dev/sdX with your actual device):"
+  echo "   $ xz -d ${OUT_DIR}/${IMG_FILENAME}.xz"
+  echo "   $ sudo dd if=${OUT_DIR}/${IMG_FILENAME} of=/dev/sdX bs=4M conv=fsync status=progress"
+  echo "   $ sync"
+  echo ""
+  echo " WARNING: All existing data on the target device will be destroyed."
+  echo " Once booted on your STB, you can optionally install it to the eMMC or SD Card using 'mira-install'."
   echo "======================================================"
 }
 
