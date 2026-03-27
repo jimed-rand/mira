@@ -131,10 +131,10 @@ The build script must run as **root** (it uses `losetup`, `mount`, `dd`, and `mk
 
 ### Building the Image
 
-Karena pipeline CI/CD sudah tidak digunakan lagi pada repositori ini, _image_ Mira sepenuhnya di-build melalui _host_ lokal Anda. Anda dapat menjalankannya secara interaktif maupun dilakukan secara otomatis (_headless_).
+Since the CI/CD pipeline is no longer used in this repository, the Mira _image_ is fully built via your local _host_. You can run it interactively or automatically (_headless_).
 
 #### 1. Interactive Build (Default)
-Secara bawaan, Anda cukup menjalankan skrip dengan hak akses _root_. Skrip akan secara interaktif menanyakan Desktop Environment apa yang ingin dipasang.
+By default, you simply execute the script with _root_ privileges. The script will interactively prompt you for which Desktop Environment to install.
 
 ```bash
 # Clone the repository and navigate into it
@@ -145,29 +145,29 @@ cd mira
 sudo bash build.sh
 ```
 
-Saat dieksekusi, skrip ini akan secara otomatis:
-1. Membuat direktori kerja isolasi `mira-workspace`.
-2. Mengunduh pustaka _rootfs tarball_ sistem Arch Linux ARM (hanya jika belum ada dalam _cache_ direktori).
-3. Melakukan konfigurasi Desktop yang Anda pilih (seperti XFCE, MATE, LXDE, atau CLI).
-4. Melakukan _compile_ dan melabeli partisis GPT/UEFI dan kompresi hasil berupa berkas `.img.xz`.
+When executed, this script will automatically:
+1. Create an isolated working directory called `mira-workspace`.
+2. Download the Arch Linux ARM system _rootfs tarball_ library (only if it doesn't already exist in the directory _cache_).
+3. Configure your chosen Desktop (such as XFCE, MATE, LXDE, or CLI).
+4. Perform the _compile_ and label the GPT/UEFI partitions and compress the result as an `.img.xz` file.
 
-Hasil dari image yang terkompres akan berada letaknya bersamaan dengan berkas `build.sh` berada.
+The resulting compressed image will be located together with the `build.sh` file.
 
 #### 2. Non-Interactive / Automated Build
-Anda juga dapat melewatkan perintah interaktif sehingga skrip berjalan secara otomatis secara fungsional. Ini sangat cocok jika Anda ingin membuat skrip rilis Anda sendiri. Atur *Environment Variables* seperti `DESKTOP_ENV` sesaat sebelum eksekusi skrip:
+You can also skip the interactive prompt so the script runs automatically. This is perfect if you want to create your own release scripts. Set *Environment Variables* like `DESKTOP_ENV` just before executing the script:
 
 ```bash
-# Pilihan instalasi DE yang valid: minimal, xfce, mate, lxde, cosmic
+# Valid DE installation options: minimal, xfce, mate, lxde, cosmic
 sudo DESKTOP_ENV="xfce" bash build.sh
 ```
 
 #### 3. Customizing the Build
-Jika Anda ingin melangkah lebih jauh, Anda juga dapat menimpa beberapa Environment Variables ini sesuai kebutuhan:
-- `OUT_FILENAME`: Mengubah nama dasar dari *image* yang akan diekspor (Default: `Mira-ArchLinuxARM-aarch64_S905X`).
-- `WORKING_DIR`: Mengarahkan direktori kerja untuk mengunduh _tarballs_ dan *mount points* internal (Default: `./mira-workspace`).
-- `ROOTFS_URL`: Menentukan URL unduhan jika Anda ingin menggunakan basis _rootfs tarball_ versi kustom atau dari _mirror_ lain.
+If you want to go further, you can also override some of these Environment Variables according to your needs:
+- `OUT_FILENAME`: Change the base name of the exported *image* (Default: `Mira-ArchLinuxARM-aarch64_S905X`).
+- `WORKING_DIR`: Redirect the working directory to download _tarballs_ and internal *mount points* (Default: `./mira-workspace`).
+- `ROOTFS_URL`: Specify a download URL if you want to use a custom version of the _rootfs tarball_ base or from another _mirror_.
 
-**Contoh kombinasi kustomisasi:**
+**Example customization combination:**
 ```bash
 sudo OUT_FILENAME="Mira-MATE-Edition" DESKTOP_ENV="mate" bash build.sh
 ```
@@ -200,7 +200,7 @@ sync
 
 > Replace `/dev/sdX` with your actual block device. **All existing data on the target device will be destroyed.**
 
-> If you don't want to use `dd`, you can use another tool with GUI which helps you like Balena Etcher, Raspberry Pi Imager, GNOME Disks, Rufus with DD method (if you use Windows and run thsi program under WSL2), etc.
+> If you don't want to use `dd`, you can use another tool with GUI which helps you like Balena Etcher, Raspberry Pi Imager, GNOME Disks, Rufus with DD method (if you use Windows and run this program under WSL2), etc.
 
 ### Default Credentials
 
