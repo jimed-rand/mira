@@ -1,0 +1,11 @@
+#!/bin/sh
+set -e
+
+# Load the FDT if specified in /etc/default/grub
+if [ -n "${GRUB_FDT}" ]; then
+  echo "Found Device Tree: ${GRUB_FDT}" >&2
+  # Print the devicetree command to the generated config
+  cat << EOF
+devicetree ${GRUB_FDT}
+EOF
+fi

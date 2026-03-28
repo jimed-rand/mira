@@ -246,7 +246,6 @@ fi
 sed -i "s|${CURRENT_HOSTNAME}|${DEFINED_HOSTNAME}|g" "${DEST_MNT}/etc/hosts"
 sed -i "s|${CURRENT_HOSTNAME}|${DEFINED_HOSTNAME}|g" "${DEST_MNT}/etc/hostname"
 
-sed -i "s|ROOT|ROOT_TARGET|g" "${DEST_MNT}/boot/extlinux/extlinux.conf"
 
 if [ "$TARGET_TYPE" == "eMMC" ]; then
     if [ -f "${DEST_MNT}/boot/u-boot.ext" ]; then

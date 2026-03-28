@@ -218,9 +218,9 @@ make_image() {
     print_err "mount ${LOOP_DEV}p1 failed!"
   fi
 
-  print_msg "[4/5] Copying files"
-  cp -af ${BOOT_FILES}/* mnt/boot
+  print_msg "[4/5] Copying files and Extracting RootFS"
   bsdtar -xpf "${ROOTFS_TARBALL_FILE}" -C mnt
+  cp -af ${BOOT_FILES}/* mnt/boot
   cp -af ${PATCH_FILES}/* mnt/
   [ -f ${SCRIPT_DIR}/lscolors.sh ] && cp ${SCRIPT_DIR}/lscolors.sh mnt/etc && chmod +x mnt/etc/lscolors.sh
 

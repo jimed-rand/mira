@@ -14,9 +14,11 @@ This is forked project from the original [nabakdev/S905X-ArchLinuxARM](https://g
 - **GRUB bootloader**
 
 ---
+
 ## Download the prebuild image
 
 For the prebuild image, you can download it from the [releases](https://github.com/jimed-rand/mira/releases) page. And for now, we only provide the minimal image variant since it does have smaller size and you can install the desktop environment manually later once it's installed.
+
 ---
 
 ## Supported Targets
@@ -25,6 +27,8 @@ For the prebuild image, you can download it from the [releases](https://github.c
 |---|---|---|
 | FiberHome HG680P | Amlogic S905X | AArch64 |
 | ZTE B860H | Amlogic S905X | AArch64 |
+
+If you live outside Indonesia or countries where those TV boxes above are available, make sure your TV boxes does have same SoC as the listed above.
 
 ---
 
@@ -67,8 +71,8 @@ Amlogic ROM
         └─► s905_autoscript  (compiled U-Boot script — loads u-boot.ext into RAM)
               └─► u-boot.ext  (MainLine U-Boot binary, executed at 0x1000000)
                   ├─► EFI/BOOT/bootaa64.efi (GRUB bootloader, modern UEFI approach)
-                  │     └─► grub.cfg -> Linux kernel (Image) + DTB
-                  └─► extlinux/extlinux.conf (Legacy syslinux boot menu fallback)
+                  └─► grub.cfg -> Linux kernel (Image) + DTB (via /etc/default/grub & /etc/grub.d/01_fdt)
+
 ```
 
 All `.cmd` source files are compiled at build time with `mkimage` into their binary counterparts. The `.cmd` sources are removed from the final image; only the compiled scripts are shipped.
@@ -87,11 +91,15 @@ mira/
     │   ├── s905_autoscript.cmd   # SD/USB autoscript source
     │   ├── boot.ini              # Legacy boot config
     │   ├── u-boot.ext            # MainLine U-Boot binary (executed by s905_autoscript, provides UEFI capability)
-    │   └── extlinux/             # Legacy extlinux boot configuration fallback
+
     └── patch/
         ├── etc/
         │   ├── _bashrc           # Appended to /etc/bash.bashrc at build time
         │   ├── fstab             # Preconfigured /etc/fstab
+        │   ├── default/
+        │   │   └── grub          # Main configuration for GRUB (CMDLINE, DTB path, etc.)
+        │   ├── grub.d/
+        │   │   └── 01_fdt        # Custom script to load FDT in GRUB
         │   ├── profile.d/        # Drop-in shell profile scripts
         │   └── udev/             # udev rules
         └── usr/                  # Overlay applied verbatim onto the rootfs
