@@ -8,10 +8,10 @@ OUT_FILENAME="${OUT_FILENAME:-Mira-ArchLinuxARM-aarch64_S905X}"
 
 ROOTFS_TYPE="ext4"
 
-SKIP_SIZE="68"
+RESERVED_SIZE="64"
 BOOT_SIZE="256"
 ROOT_SIZE="1536"
-IMG_SIZE="$((SKIP_SIZE + BOOT_SIZE + ROOT_SIZE))"
+IMG_SIZE="$((RESERVED_SIZE + BOOT_SIZE + ROOT_SIZE))"
 
 BOOT_LABEL="BOOT"
 ROOT_LABEL="ROOT"
@@ -185,20 +185,21 @@ make_image() {
   sync
 
   parted -s ${IMG_FILENAME} mklabel gpt 2>/dev/null
-  parted -s ${IMG_FILENAME} mkpart "ESP" fat32 $((SKIP_SIZE))MiB $((SKIP_SIZE + BOOT_SIZE - 1))MiB 2>/dev/null
-  parted -s ${IMG_FILENAME} set 1 esp on 2>/dev/null
-  parted -s ${IMG_FILENAME} mkpart "ROOT" ${ROOTFS_TYPE} $((SKIP_SIZE + BOOT_SIZE))MiB 100% 2>/dev/null
+  parted -s ${IMG_FILENAME} mkpart "Reserved" 1MiB $((RESERVED_SIZE))MiB 2>/dev/null
+  parted -s ${IMG_FILENAME} mkpart "ESP" fat32 $((RESERVED_SIZE))MiB $((RESERVED_SIZE + BOOT_SIZE))MiB 2>/dev/null
+  parted -s ${IMG_FILENAME} set 2 esp on 2>/dev/null
+  parted -s ${IMG_FILENAME} mkpart "ROOT" ${ROOTFS_TYPE} $((RESERVED_SIZE + BOOT_SIZE))MiB 100% 2>/dev/null
   sync
 
   LOOP_DEV="$(losetup -P -f --show "${IMG_FILENAME}")"
   [[ -n "${LOOP_DEV}" ]] || echo "losetup ${IMG_FILENAME} failed."
 
-  mkfs.vfat -n ${BOOT_LABEL} ${LOOP_DEV}p1 >/dev/null 2>&1
+  mkfs.vfat -n ${BOOT_LABEL} ${LOOP_DEV}p2 >/dev/null 2>&1
 
   if [[ "${ROOTFS_TYPE}" == "btrfs" ]]; then
-    mkfs.btrfs -f -L ${ROOT_LABEL} -m single ${LOOP_DEV}p2 >/dev/null 2>&1
+    mkfs.btrfs -f -L ${ROOT_LABEL} -m single ${LOOP_DEV}p3 >/dev/null 2>&1
   else
-    mkfs.ext4 -O ^metadata_csum,^64bit -F -q -L ${ROOT_LABEL} -m 0 ${LOOP_DEV}p2 >/dev/null 2>&1
+    mkfs.ext4 -O ^metadata_csum,^64bit -F -q -L ${ROOT_LABEL} -m 0 ${LOOP_DEV}p3 >/dev/null 2>&1
   fi
 
   # TODO: Write device bootloader
@@ -206,16 +207,16 @@ make_image() {
   mkdir -p mnt && sync
 
   print_msg "[3/5] Mounting IMG File"
-  if ! mount ${LOOP_DEV}p2 mnt; then
+  if ! mount ${LOOP_DEV}p3 mnt; then
     # fdisk -l
-    print_err "mount ${LOOP_DEV}p2 failed!"
+    print_err "mount ${LOOP_DEV}p3 failed!"
   fi
 
   mkdir -p mnt/boot && sync
 
-  if ! mount ${LOOP_DEV}p1 mnt/boot; then
+  if ! mount ${LOOP_DEV}p2 mnt/boot; then
     # fdisk -l
-    print_err "mount ${LOOP_DEV}p1 failed!"
+    print_err "mount ${LOOP_DEV}p2 failed!"
   fi
 
   print_msg "[4/5] Copying files and Extracting RootFS"

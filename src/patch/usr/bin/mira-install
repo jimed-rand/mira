@@ -34,26 +34,38 @@ function pprint() {
 
 function status_text() {
     if [ $1 -eq 0 ]; then
-      echo -e " \e[32m[OK]\e[39m"
+      echo -e " OK"
     else
-      echo -e " \e[31m[FAIL]\e[39m"
+      echo -e " FAIL"
     fi
 }
 
-SKIP=700
-BOOT=256
+# Partition sizes (MiB)
+RESERVED=64
+BOOT=128
+SWAP=3072
 DEFAULT_UBOOT=/root/default-uboot.img
 DEST_MNT=/mnt/MiraInstall
 
-echo "========================================="
-echo "        Mira ALARM Installer             "
-echo "========================================="
-echo "Select installation target:"
-echo "1) eMMC (Internal Storage)"
-echo "2) SD Card / TF Card"
-echo "3) Exit"
-echo "-----------------------------------------"
-read -p "[?] Your choice: " TARGET_CHOICE
+echo "================================================================="
+echo "                  Mira ALARM Linux Installer                     "
+echo "================================================================="
+echo " Select installation target:"
+echo ""
+echo " 1) eMMC (Internal Storage) - [RECOMMENDED if you don't need big storage]"
+echo "    - Highest read/write speeds for maximum system performance."
+echo "    - All components (Boot, Swap, & Root) will reside on eMMC."
+echo "    - Best for daily use where stability and speed are key."
+echo ""
+echo " 2) SD Card / TF Card (External Storage)"
+echo "    - Use if you require more storage capacity for your root partition."
+echo "    - IMPORTANT: Boot stack (ESP) and Swap will still be placed on"
+echo "      eMMC to ensure the system boots reliably every time."
+echo "    - Only the Root partition (System Data) will reside on the SD Card."
+echo ""
+echo " 3) Exit (Cancel)"
+echo "-----------------------------------------------------------------"
+read -p " Enter choice (1-3) > " TARGET_CHOICE
 
 case "$TARGET_CHOICE" in
   1)
@@ -79,17 +91,23 @@ case "$TARGET_CHOICE" in
     ;;
 esac
 
-# Identify eMMC explicitly for swap
+# Identify eMMC device (always needed for boot/swap)
 EMMC_DEV="/dev/$(lsblk -l -o NAME | grep -oE '(mmcblk[0-9]?boot0)' | sed "s/boot0//g" | head -n 1)"
 if [ -z "$EMMC_DEV" ] || [ "$EMMC_DEV" == "/dev/" ]; then
     EMMC_DEV=""
 fi
 
+# When target is SD, eMMC is mandatory for boot+swap
+if [ "$TARGET_TYPE" == "SD" ] && [ -z "$EMMC_DEV" ]; then
+    echo "Error: SD Card installation requires eMMC to be present (for boot and swap)." >&2
+    exit 1
+fi
+
 echo "-----------------------------------------"
-echo "Choose Root Filesystem type:"
-echo "1) ext4 (Default)"
-echo "2) xfs"
-read -p "[?] Your choice: " FS_CHOICE
+echo " Select Root Filesystem type:"
+echo " 1) ext4 (Default choice - Stable & Mature)"
+echo " 2) xfs  (Better performance for large file operations)"
+read -p " Enter choice (1-2) [1] > " FS_CHOICE
 
 if [ "$FS_CHOICE" == "2" ]; then
     ROOTFS_TYPE="xfs"
@@ -101,151 +119,191 @@ else
     FSTAB_OPTIONS="defaults,noatime,errors=remount-ro,commit=60 0 1"
 fi
 
-echo "-----------------------------------------"
-echo "Swap configuration (3072 MiB):"
-echo "1) Create Swap on eMMC (Fully use eMMC if target is SD, or partitioned if eMMC)"
-echo "2) Create Swap on SD Card"
-echo "3) No Swap"
-read -p "[?] Your choice: " SWAP_CHOICE
-
-case "$SWAP_CHOICE" in
-  1) SWAP_TARGET="eMMC" ;;
-  2) SWAP_TARGET="SD" ;;
-  *) SWAP_TARGET="None" ;;
-esac
-
 if [ -z "$DEST_DEV" ] || [ "$DEST_DEV" == "/dev/" ]; then
     echo "Error: Could not find target device ($TARGET_NAME)."
     exit 1
 fi
 
-DEST_BOOT="${DEST_DEV}p1"
-
-if [ "$SWAP_TARGET" == "$TARGET_TYPE" ]; then
-    DEST_SWAP="${DEST_DEV}p2"
-    DEST_ROOT="${DEST_DEV}p3"
+# Derive partition variables based on target type
+# eMMC layout (both cases): p1=Reserved, p2=ESP, p3=SWAP, p4=ROOT (eMMC target only)
+# SD layout: p1=ROOT only (boot+swap live on eMMC)
+if [ "$TARGET_TYPE" == "eMMC" ]; then
+    DEST_BOOT="${DEST_DEV}p2"
+    DEST_SWAP="${DEST_DEV}p3"
+    DEST_ROOT="${DEST_DEV}p4"
 else
-    DEST_ROOT="${DEST_DEV}p2"
+    # SD: root is the only partition on SD
+    DEST_ROOT="${DEST_DEV}p1"
+    # boot and swap are on eMMC
+    EMMC_BOOT="${EMMC_DEV}p2"
+    EMMC_SWAP="${EMMC_DEV}p3"
 fi
 
-read -p "[?] Hostname: " DEFINED_HOSTNAME
+read -p " Enter Hostname for your device > " DEFINED_HOSTNAME
 DEFINED_HOSTNAME="$(echo -e "${DEFINED_HOSTNAME}" | tr -d '[:space:]')"
 CURRENT_HOSTNAME="$(cat /etc/hostname | sed -e 's/^[[:space:]]*//')"
 
 rm -rf /boot/LOST.DIR >/dev/null 2>&1
 
-pprint "[+] $TARGET_NAME found: $DEST_DEV\n"
+pprint "+ $TARGET_NAME found: $DEST_DEV\n"
 
 umount ${DEST_DEV}?* >/dev/null 2>&1
 
-pprint "[+] Start installing to $DEST_DEV\n"
+# ─────────────────────────────────────────
+# eMMC partitioning — always done
+# Used for boot (ESP) + swap in both cases;
+# also includes root when target is eMMC.
+# ─────────────────────────────────────────
+pprint "+ Preparing eMMC partitions\n"
+
+umount ${EMMC_DEV}?* >/dev/null 2>&1
 
 if [ "$TARGET_TYPE" == "eMMC" ]; then
-    pprint "[+] Backup u-boot to $DEFAULT_UBOOT"
+    pprint "    > Backup u-boot to $DEFAULT_UBOOT"
     dd if="${DEST_DEV}" of="$DEFAULT_UBOOT" bs=1M count=4 conv=fsync > /dev/null 2>&1
     status_text $?
     sync
 fi
 
-pprint "[+] Update $TARGET_NAME partition\n"
-
-pprint "    > Zero the beginning of the $TARGET_NAME"
-dd if=/dev/zero of=${DEST_DEV} bs=512 count=1 conv=fsync > /dev/null 2>&1
+pprint "    > Zero the beginning of eMMC"
+dd if=/dev/zero of=${EMMC_DEV} bs=512 count=1 conv=fsync > /dev/null 2>&1
 status_text $?
 sync
 
-pprint "    > Format $TARGET_NAME to gpt"
-parted -s "${DEST_DEV}" mklabel gpt > /dev/null 2>&1
-status_text $?
-sync
-pprint "    > Create boot partition (ESP)"
-parted -s "${DEST_DEV}" mkpart "ESP" fat32 $((SKIP * 1024 * 1024))b $(((SKIP + BOOT) * 1024 * 1024 - 1))b > /dev/null 2>&1
-parted -s "${DEST_DEV}" set 1 esp on > /dev/null 2>&1
+pprint "    > Format eMMC to GPT"
+parted -s "${EMMC_DEV}" mklabel gpt > /dev/null 2>&1
 status_text $?
 sync
 
-if [ "$SWAP_TARGET" == "$TARGET_TYPE" ]; then
-    pprint "    > Create swap partition (3072 MiB)"
-    parted -s "${DEST_DEV}" mkpart "SWAP" linux-swap $(((SKIP + BOOT) * 1024 * 1024))b $(((SKIP + BOOT + 3072) * 1024 * 1024 - 1))b > /dev/null 2>&1
-    status_text $?
-    sync
-    pprint "    > Create root partition ($ROOTFS_TYPE)"
-    parted -s "${DEST_DEV}" mkpart "ROOT" ${ROOTFS_TYPE} $(((SKIP + BOOT + 3072) * 1024 * 1024))b 100% > /dev/null 2>&1
+pprint "    > Create Reserved partition (${RESERVED} MiB)"
+parted -s "${EMMC_DEV}" mkpart "Reserved" 1MiB ${RESERVED}MiB > /dev/null 2>&1
+status_text $?
+sync
+
+pprint "    > Create ESP partition (${BOOT} MiB)"
+parted -s "${EMMC_DEV}" mkpart "ESP" fat32 ${RESERVED}MiB $((RESERVED + BOOT))MiB > /dev/null 2>&1
+parted -s "${EMMC_DEV}" set 2 esp on > /dev/null 2>&1
+status_text $?
+sync
+
+if [ "$TARGET_TYPE" == "SD" ]; then
+    # Use all remaining eMMC space for SWAP
+    pprint "    > Create SWAP partition (entire remaining eMMC space)"
+    parted -s "${EMMC_DEV}" mkpart "SWAP" linux-swap $((RESERVED + BOOT))MiB 100% > /dev/null 2>&1
     status_text $?
     sync
 else
-    pprint "    > Create root partition ($ROOTFS_TYPE)"
-    parted -s "${DEST_DEV}" mkpart "ROOT" ${ROOTFS_TYPE} $(((SKIP + BOOT) * 1024 * 1024))b 100% > /dev/null 2>&1
+    # eMMC target: fixed 3072 MiB for swap, rest for root
+    pprint "    > Create SWAP partition (${SWAP} MiB)"
+    parted -s "${EMMC_DEV}" mkpart "SWAP" linux-swap $((RESERVED + BOOT))MiB $((RESERVED + BOOT + SWAP))MiB > /dev/null 2>&1
+    status_text $?
+    sync
+    pprint "    > Create ROOT partition (remaining space, ${ROOTFS_TYPE})"
+    parted -s "${EMMC_DEV}" mkpart "ROOT" ${ROOTFS_TYPE} $((RESERVED + BOOT + SWAP))MiB 100% > /dev/null 2>&1
     status_text $?
     sync
 fi
 
-if [ "$TARGET_TYPE" == "SD" ] && [ "$SWAP_TARGET" == "eMMC" ] && [ -n "$EMMC_DEV" ]; then
-    pprint "    > Create swap using entire eMMC storage"
-    dd if=/dev/zero of=${EMMC_DEV} bs=512 count=1 conv=fsync > /dev/null 2>&1
-    parted -s "${EMMC_DEV}" mklabel gpt > /dev/null 2>&1
-    parted -s "${EMMC_DEV}" mkpart "SWAP" linux-swap 1MiB 100% > /dev/null 2>&1
-    mkswap -f -L "SWAP_TARGET" "${EMMC_DEV}p1" > /dev/null 2>&1
-    status_text $?
-    sync
-elif [ "$SWAP_TARGET" == "SD" ] && [ "$TARGET_TYPE" == "eMMC" ]; then
-    pprint "    ! Warning: Swap target SD while installing to eMMC not automatically partitioned."
-fi
+# Format eMMC partitions
+pprint "    > Format ESP (FAT32)"
+mkfs.vfat -F32 -n "BOOT_TARGET" "${EMMC_DEV}p2" > /dev/null 2>&1
+status_text $?
+
+pprint "    > Format SWAP"
+mkswap -f -L "SWAP_TARGET" "${EMMC_DEV}p3" > /dev/null 2>&1
+status_text $?
 
 if [ "$TARGET_TYPE" == "eMMC" ]; then
-    pprint "[+] Restore u-boot"
-    dd if="$DEFAULT_UBOOT" of="${DEST_DEV}" conv=fsync bs=1 count=442 > /dev/null 2>&1
-    dd if="$DEFAULT_UBOOT" of="${DEST_DEV}" conv=fsync bs=512 skip=1 seek=1 > /dev/null 2>&1
+    if [ "$ROOTFS_TYPE" == "xfs" ]; then
+        pprint "    > Format ROOT (XFS)"
+        mkfs.xfs -f -L "ROOT_TARGET" "${EMMC_DEV}p4" > /dev/null 2>&1
+    else
+        pprint "    > Format ROOT (ext4)"
+        mkfs.ext4 -O ^metadata_csum,^64bit -F -L "ROOT_TARGET" "${EMMC_DEV}p4" > /dev/null 2>&1
+        tune2fs -O fast_commit "${EMMC_DEV}p4" > /dev/null 2>&1
+    fi
+    status_text $?
+fi
+
+sync
+
+# ─────────────────────────────────────────
+# Restore u-boot if eMMC is target
+# ─────────────────────────────────────────
+if [ "$TARGET_TYPE" == "eMMC" ]; then
+    pprint "+ Restore u-boot"
+    dd if="$DEFAULT_UBOOT" of="${EMMC_DEV}" conv=fsync bs=1 count=442 > /dev/null 2>&1
+    dd if="$DEFAULT_UBOOT" of="${EMMC_DEV}" conv=fsync bs=512 skip=1 seek=1 > /dev/null 2>&1
     status_text $?
     sync
 fi
 
-pprint "[+] Formatting $TARGET_NAME partition"
-mkfs.vfat -F32 -n "BOOT_TARGET" "$DEST_BOOT" > /dev/null 2>&1
+# ─────────────────────────────────────────
+# SD Card partitioning — only if SD target
+# ─────────────────────────────────────────
+if [ "$TARGET_TYPE" == "SD" ]; then
+    pprint "+ Preparing SD Card partition\n"
 
-if [ "$ROOTFS_TYPE" == "xfs" ]; then
-    mkfs.xfs -f -L "ROOT_TARGET" "$DEST_ROOT" > /dev/null 2>&1
-else
-    mkfs.ext4 -O ^metadata_csum,^64bit -F -L "ROOT_TARGET" "$DEST_ROOT" > /dev/null 2>&1
-    tune2fs -O fast_commit $DEST_ROOT > /dev/null 2>&1
+    pprint "    > Zero the beginning of SD Card"
+    dd if=/dev/zero of=${DEST_DEV} bs=512 count=1 conv=fsync > /dev/null 2>&1
+    status_text $?
+    sync
+
+    pprint "    > Format SD Card to GPT"
+    parted -s "${DEST_DEV}" mklabel gpt > /dev/null 2>&1
+    status_text $?
+    sync
+
+    pprint "    > Create ROOT partition (entire SD Card, ${ROOTFS_TYPE})"
+    parted -s "${DEST_DEV}" mkpart "ROOT" ${ROOTFS_TYPE} 1MiB 100% > /dev/null 2>&1
+    status_text $?
+    sync
+
+    pprint "    > Format ROOT"
+    if [ "$ROOTFS_TYPE" == "xfs" ]; then
+        mkfs.xfs -f -L "ROOT_TARGET" "${DEST_DEV}p1" > /dev/null 2>&1
+    else
+        mkfs.ext4 -O ^metadata_csum,^64bit -F -L "ROOT_TARGET" "${DEST_DEV}p1" > /dev/null 2>&1
+        tune2fs -O fast_commit "${DEST_DEV}p1" > /dev/null 2>&1
+    fi
+    status_text $?
+    sync
 fi
 
-if [ "$SWAP_TARGET" == "$TARGET_TYPE" ]; then
-    mkswap -f -L "SWAP_TARGET" "$DEST_SWAP" > /dev/null 2>&1
-fi
-
-status_text $?
-sync
-
-pprint "[+] Mounting '$DEST_DEV' partition to '$DEST_MNT'"
+# ─────────────────────────────────────────
+# Mount and copy files
+# ─────────────────────────────────────────
+pprint "+ Mounting partitions to '$DEST_MNT'\n"
 if [ -d ${DEST_MNT} ]; then
     rm -rf ${DEST_MNT}
 fi
 mkdir -p ${DEST_MNT}
+
 mount "$DEST_ROOT" "$DEST_MNT" > /dev/null 2>&1
 mkdir -p "${DEST_MNT}/boot"
-mount "$DEST_BOOT" "$DEST_MNT/boot" > /dev/null 2>&1
+
+if [ "$TARGET_TYPE" == "eMMC" ]; then
+    mount "${EMMC_DEV}p2" "${DEST_MNT}/boot" > /dev/null 2>&1
+else
+    mount "${EMMC_DEV}p2" "${DEST_MNT}/boot" > /dev/null 2>&1
+fi
 status_text $?
 sync
 
-pprint "[+] Copying files to $TARGET_NAME\n"
+pprint "+ Copying files to $TARGET_NAME\n"
 rsync -axHAWXS --numeric-ids --info=progress2 / "$DEST_MNT/"
 rsync -axHAWXS --numeric-ids --info=progress2 /boot/ "$DEST_MNT/boot/"
 sync
 
-pprint "[+] Updating configs"
+pprint "+ Updating configs\n"
 cat >${DEST_MNT}/etc/fstab <<EOF
 LABEL=ROOT_TARGET       /               ${FSTAB_TYPE}            ${FSTAB_OPTIONS}
-LABEL=BOOT_TARGET 	/boot           vfat        defaults,noatime,errors=remount-ro 0 2
+LABEL=BOOT_TARGET	/boot           vfat        defaults,noatime,errors=remount-ro 0 2
+LABEL=SWAP_TARGET       none            swap            defaults        0 0
 EOF
-
-if [ "$SWAP_TARGET" != "None" ]; then
-    echo "LABEL=SWAP_TARGET       none            swap            defaults        0 0" >> ${DEST_MNT}/etc/fstab
-fi
 
 sed -i "s|${CURRENT_HOSTNAME}|${DEFINED_HOSTNAME}|g" "${DEST_MNT}/etc/hosts"
 sed -i "s|${CURRENT_HOSTNAME}|${DEFINED_HOSTNAME}|g" "${DEST_MNT}/etc/hostname"
-
 
 if [ "$TARGET_TYPE" == "eMMC" ]; then
     if [ -f "${DEST_MNT}/boot/u-boot.ext" ]; then
@@ -257,7 +315,7 @@ fi
 status_text $?
 sync
 
-pprint "[+] Reconfiguring GRUB for target device"
+pprint "+ Reconfiguring GRUB for target device"
 mount --bind /dev "${DEST_MNT}/dev"
 mount --bind /sys "${DEST_MNT}/sys"
 mount --bind /proc "${DEST_MNT}/proc"
@@ -280,9 +338,19 @@ echo " Congratulations! Mira ALARM installation has completed successfully. "
 echo "================================================================="
 if [ "$TARGET_TYPE" == "eMMC" ]; then
     echo " Please remove the installation media (USB drive) before the"
-    echo " device reboots to boot directly from internal storage."
+    echo " device reboots to boot directly from internal storage (eMMC)."
+    echo ""
+    echo " eMMC layout: Reserved(64M) | ESP/BOOT(128M) | SWAP(3072M) | ROOT"
 else
-    echo " Make sure your SD Card is securely inserted as the boot drive."
+    echo " !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+    echo " !!  WARNING: DO NOT EVER REMOVE THE SD CARD OR THE SYSTEM      !!"
+    echo " !!  WILL NOT BE ABLE TO BOOT!                                  !!"
+    echo " !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+    echo ""
+    echo " The system will boot via eMMC (ESP) and run from the SD Card."
+    echo ""
+    echo " eMMC layout: Reserved(64M) | ESP/BOOT(128M) | SWAP(rest)"
+    echo " SD  layout:  ROOT (entire card)"
 fi
 echo ""
 echo " Default Login Credentials:"
